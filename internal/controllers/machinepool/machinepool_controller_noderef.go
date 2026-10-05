@@ -19,6 +19,7 @@ package machinepool
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/pkg/errors"
@@ -40,6 +41,13 @@ import (
 )
 
 var errNoAvailableNodes = errors.New("cannot find nodes with matching ProviderIDs in ProviderIDList")
+
+const (
+	// nodeRefFailureCountAnnotation tracks consecutive NodeRef assignment failures in emulator mode.
+	nodeRefFailureCountAnnotation = "cluster.x-k8s.io/node-ref-failure-count"
+	// maxNodeRefFailureRetries bounds the consecutive failures before a correction requeue is forced.
+	maxNodeRefFailureRetries = 15
+)
 
 type getNodeReferencesResult struct {
 	references []corev1.ObjectReference
@@ -124,6 +132,28 @@ func (r *Reconciler) reconcileNodeRefs(ctx context.Context, s *scope) (ctrl.Resu
 	if err != nil {
 		if errors.Is(err, errNoAvailableNodes) {
 			log.Info("Cannot assign NodeRefs to MachinePool, no matching Nodes")
+
+			// In emulator environments, track consecutive failures to detect persistent
+			// ProviderID mismatches and trigger a requeue for correction.
+			if s.isEmulator {
+				failureCount := r.getNodeRefFailureCount(mp)
+				log.Info("NodeRef assignment failed (emulator)", "failureCount", failureCount, "maxRetries", maxNodeRefFailureRetries)
+
+				if failureCount >= maxNodeRefFailureRetries {
+					log.Info("Too many NodeRef assignment failures, triggering ProviderID correction retry", "failureCount", failureCount)
+					if err := r.clearNodeRefFailureCount(ctx, mp); err != nil {
+						log.Error(err, "Failed to clear NodeRef failure count")
+					}
+					return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+				} else {
+					if err := r.incrementNodeRefFailureCount(ctx, mp); err != nil {
+						log.Error(err, "Failed to increment NodeRef failure count")
+					} else {
+						log.Info("Incremented NodeRef failure count", "newCount", failureCount+1)
+					}
+				}
+			}
+
 			// No need to requeue here. Nodes emit an event that triggers reconciliation.
 			return ctrl.Result{}, nil
 		}
@@ -141,6 +171,13 @@ func (r *Reconciler) reconcileNodeRefs(ctx context.Context, s *scope) (ctrl.Resu
 	mp.Status.Deprecated.V1Beta1.AvailableReplicas = int32(nodeRefsResult.available)
 	mp.Status.Deprecated.V1Beta1.UnavailableReplicas = ptr.Deref(mp.Status.Replicas, 0) - mp.Status.Deprecated.V1Beta1.AvailableReplicas
 	mp.Status.NodeRefs = nodeRefsResult.references
+
+	// Clear failure count on successful NodeRef assignment (emulator only)
+	if s.isEmulator {
+		if err := r.clearNodeRefFailureCount(ctx, mp); err != nil {
+			log.Error(err, "Failed to clear NodeRef failure count on success")
+		}
+	}
 
 	log.Info("Set MachinePool's NodeRefs", "nodeRefs", mp.Status.NodeRefs)
 	r.recorder.Event(mp, corev1.EventTypeNormal, "SuccessfulSetNodeRefs", fmt.Sprintf("%+v", mp.Status.NodeRefs))
@@ -260,5 +297,39 @@ func (r *Reconciler) patchNodes(ctx context.Context, c client.Client, references
 			}
 		}
 	}
+	return nil
+}
+
+// getNodeRefFailureCount returns the number of consecutive NodeRef assignment failures.
+func (r *Reconciler) getNodeRefFailureCount(mp *clusterv1.MachinePool) int {
+	if mp.Annotations == nil {
+		return 0
+	}
+	if countStr, exists := mp.Annotations[nodeRefFailureCountAnnotation]; exists {
+		if count, err := strconv.Atoi(countStr); err == nil {
+			return count
+		}
+	}
+	return 0
+}
+
+// incrementNodeRefFailureCount increments the NodeRef assignment failure count.
+func (r *Reconciler) incrementNodeRefFailureCount(ctx context.Context, mp *clusterv1.MachinePool) error {
+	if mp.Annotations == nil {
+		mp.Annotations = make(map[string]string)
+	}
+	currentCount := r.getNodeRefFailureCount(mp)
+	mp.Annotations[nodeRefFailureCountAnnotation] = strconv.Itoa(currentCount + 1)
+	// Do not persist here; the outer deferred patch in the main reconcile will persist this change safely.
+	return nil
+}
+
+// clearNodeRefFailureCount clears the NodeRef assignment failure count.
+func (r *Reconciler) clearNodeRefFailureCount(ctx context.Context, mp *clusterv1.MachinePool) error {
+	if mp.Annotations == nil {
+		return nil
+	}
+	delete(mp.Annotations, "cluster.x-k8s.io/node-ref-failure-count")
+	// Do not persist here; the outer deferred patch in the main reconcile will persist this change safely.
 	return nil
 }
