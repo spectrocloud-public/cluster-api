@@ -46,6 +46,11 @@ type scope struct {
 
 	// machines holds a list of the machines associated with this machine pool.
 	machines []*clusterv1.Machine
+
+	// isEmulator indicates if the cluster is running in a Sequoia emulator environment.
+	// When true, ProviderID correction and NodeRef retry logic are activated.
+	// It is set after reconcileInfrastructure reads the CAPA credentials secret.
+	isEmulator bool
 }
 
 func (s *scope) hasMachinePoolMachines() (bool, error) {
