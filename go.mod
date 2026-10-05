@@ -56,6 +56,8 @@ require (
 	sigs.k8s.io/yaml v1.6.0
 )
 
+require gopkg.in/ini.v1 v1.67.0
+
 require (
 	cel.dev/expr v0.25.2 // indirect
 	dario.cat/mergo v1.0.1 // indirect
