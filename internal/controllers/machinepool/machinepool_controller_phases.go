@@ -20,9 +20,11 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
+	"gopkg.in/ini.v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,6 +42,7 @@ import (
 	"sigs.k8s.io/cluster-api/controllers/external"
 	capierrors "sigs.k8s.io/cluster-api/errors"
 	"sigs.k8s.io/cluster-api/internal/contract"
+	capautil "sigs.k8s.io/cluster-api/internal/util/capa"
 	"sigs.k8s.io/cluster-api/internal/util/ssa"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
@@ -299,9 +302,11 @@ func (r *Reconciler) reconcileInfrastructure(ctx context.Context, s *scope) (ctr
 		return ctrl.Result{}, err
 	}
 
-	var getNodeRefsErr error
-	// Get the nodeRefsMap from the cluster.
-	s.nodeRefMap, getNodeRefsErr = r.getNodeRefMap(ctx, clusterClient)
+	// Get the nodeRefsMap from the cluster. Pass the management client and namespace
+	// so it can read the CAPA secret for emulator-based ProviderID correction.
+	nodeRefs, getNodeRefsErr := r.getNodeRefMap(ctx, r.Client, clusterClient, cluster.Namespace)
+	s.nodeRefMap = nodeRefs.refs
+	s.isEmulator = nodeRefs.isEmulator
 
 	err = r.reconcileMachines(ctx, s, infraConfig)
 
@@ -318,6 +323,18 @@ func (r *Reconciler) reconcileInfrastructure(ctx context.Context, s *scope) (ctr
 	// Get Spec.ProviderIDList from the infrastructure provider.
 	if err := util.UnstructuredUnmarshalField(infraConfig, &providerIDList, "spec", "providerIDList"); err != nil && !errors.Is(err, util.ErrUnstructuredFieldNotFound) {
 		return ctrl.Result{}, errors.Wrapf(err, "failed to retrieve data from infrastructure provider for MachinePool %q in namespace %q", mp.Name, mp.Namespace)
+	}
+
+	// Correct AWS ProviderIDs in the list to use the original region (emulator only).
+	if nodeRefs.originalRegion != "" {
+		log.Info("Correcting ProviderIDList for emulated secret region", "count", len(providerIDList), "originalRegion", nodeRefs.originalRegion)
+		for i, providerID := range providerIDList {
+			correctedProviderID := correctAWSProviderID(providerID, nodeRefs.originalRegion)
+			if correctedProviderID != providerID {
+				log.Info("Corrected AWS ProviderID in list", "original", providerID, "corrected", correctedProviderID)
+				providerIDList[i] = correctedProviderID
+			}
+		}
 	}
 
 	// Get and set Status.Replicas from the infrastructure provider.
@@ -586,13 +603,56 @@ func (r *Reconciler) waitForMachineCreation(ctx context.Context, machineList []c
 	return nil
 }
 
-func (r *Reconciler) getNodeRefMap(ctx context.Context, c client.Client) (map[string]*corev1.Node, error) {
+const awsProviderIDPrefix = "aws:///"
+
+// nodeRefMapResult is the outcome of getNodeRefMap: the providerID -> Node map plus the
+// emulator context used to correct AWS ProviderIDs whose emulated secret-region zone must
+// be rewritten back to the original commercial region.
+type nodeRefMapResult struct {
+	refs           map[string]*corev1.Node
+	originalRegion string
+	isEmulator     bool
+}
+
+func (r *Reconciler) getNodeRefMap(ctx context.Context, mgmtClient client.Client, clusterClient client.Client, clusterNamespace string) (nodeRefMapResult, error) {
 	log := ctrl.LoggerFrom(ctx)
 	nodeRefsMap := make(map[string]*corev1.Node)
 	nodeList := corev1.NodeList{}
+
+	// Read the CAPA credentials secret from the cluster namespace to check for the
+	// sequoia-emulator flag and extract the original region for ProviderID correction.
+	var originalRegion string
+	isEmulator := false
+
+	secret := &corev1.Secret{}
+	if err := mgmtClient.Get(ctx, client.ObjectKey{Namespace: clusterNamespace, Name: capautil.ManagerBootstrapCredentialsSecretName}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			log.V(4).Info("CAPA credentials secret not found, proceeding without region correction", "namespace", clusterNamespace)
+		} else {
+			log.Info("Error getting CAPA credentials secret, proceeding without region correction", "namespace", clusterNamespace, "error", err)
+		}
+	} else {
+		// Check if this is an emulator environment.
+		if string(secret.Data[capautil.SequoiaEmulatorKey]) == "true" {
+			isEmulator = true
+			log.Info("Sequoia emulator detected, ProviderID correction is enabled")
+		}
+
+		// Extract the real AWS region from the config section (only useful in emulator).
+		if isEmulator && secret.Data["config"] != nil {
+			cfg, err := ini.Load(secret.Data["config"])
+			if err != nil {
+				log.Info("Failed to parse AWS config, proceeding without region correction", "error", err)
+			} else {
+				originalRegion = cfg.Section("default").Key("region").String()
+				log.Info("Extracted AWS region from CAPA config", "region", originalRegion)
+			}
+		}
+	}
+
 	// Note: We don't use pagination as this is a cached client and a cached client doesn't support pagination.
-	if err := c.List(ctx, &nodeList); err != nil {
-		return nil, err
+	if err := clusterClient.List(ctx, &nodeList); err != nil {
+		return nodeRefMapResult{}, err
 	}
 
 	for _, node := range nodeList.Items {
@@ -601,8 +661,45 @@ func (r *Reconciler) getNodeRefMap(ctx context.Context, c client.Client) (map[st
 			continue
 		}
 
-		nodeRefsMap[node.Spec.ProviderID] = &node
+		nodeCopy := node.DeepCopy()
+		correctedProviderID := node.Spec.ProviderID
+
+		// Only correct ProviderIDs when running in an emulator environment with a known region.
+		if isEmulator && originalRegion != "" {
+			correctedProviderID = correctAWSProviderID(node.Spec.ProviderID, originalRegion)
+			if correctedProviderID != node.Spec.ProviderID {
+				nodeCopy.Spec.ProviderID = correctedProviderID
+				log.Info("Corrected AWS node ProviderID", "original", node.Spec.ProviderID, "corrected", correctedProviderID)
+			}
+		}
+
+		nodeRefsMap[correctedProviderID] = nodeCopy
 	}
 
-	return nodeRefsMap, nil
+	return nodeRefMapResult{
+		refs:           nodeRefsMap,
+		originalRegion: originalRegion,
+		isEmulator:     isEmulator,
+	}, nil
+}
+
+// correctAWSProviderID rewrites the zone in an AWS ProviderID (aws:///<zone>/<id>) to the
+// original region, replacing the emulated secret-region zone suffix.
+func correctAWSProviderID(providerID, originalRegion string) string {
+	if !strings.HasPrefix(providerID, awsProviderIDPrefix) {
+		return providerID
+	}
+
+	parts := strings.Split(providerID, "/")
+	if len(parts) < 5 {
+		return providerID
+	}
+
+	zoneParts := strings.Split(parts[3], "-")
+	if len(zoneParts) < 3 {
+		return providerID
+	}
+
+	correctedZone := fmt.Sprintf("%s-%s", originalRegion, zoneParts[len(zoneParts)-1])
+	return fmt.Sprintf("%s%s/%s", awsProviderIDPrefix, correctedZone, parts[4])
 }
