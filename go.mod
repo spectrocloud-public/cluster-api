@@ -1,6 +1,6 @@
 module sigs.k8s.io/cluster-api
 
-go 1.26.5
+go 1.26.9
 
 require (
 	github.com/MakeNowJust/heredoc v1.0.0
@@ -18,7 +18,7 @@ require (
 	github.com/go-logr/logr v1.4.4
 	github.com/gobuffalo/flect v1.0.3
 	// Note: This must be kept in sync with the version used by k8s.io.
-	github.com/google/cel-go v0.26.0
+	github.com/google/cel-go v0.30.0
 	github.com/google/go-cmp v0.7.0
 	github.com/google/go-github/v82 v82.0.0
 	github.com/olekukonko/tablewriter v1.0.9
@@ -32,10 +32,10 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/valyala/fastjson v1.6.10
 	go.etcd.io/etcd/api/v3 v3.6.10
-	go.etcd.io/etcd/client/pkg/v3 v3.6.10
+	go.etcd.io/etcd/client/pkg/v3 v3.6.14
 	go.etcd.io/etcd/client/v3 v3.6.10
 	go.uber.org/zap v1.27.1
-	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56 // indirect
+	golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 // indirect
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/text v0.42.0
 	gomodules.xyz/jsonpatch/v2 v2.5.0
@@ -66,7 +66,7 @@ require (
 	github.com/NYTimes/gziphandler v1.1.1 // indirect
 	github.com/ajeddeloh/go-json v0.0.0-20200220154158-5ae607161559 // indirect
 	github.com/alecthomas/units v0.0.0-20211218093645-b94a6e3cc137 // indirect
-	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
+	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -134,7 +134,6 @@ require (
 	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
-	github.com/stoewer/go-strcase v1.3.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/vincent-petithory/dataurl v1.0.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
@@ -154,7 +153,7 @@ require (
 	go4.org v0.0.0-20201209231011-d4a079459e60 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/mod v0.41.0 // indirect
-	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.46.0 // indirect
